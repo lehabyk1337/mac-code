@@ -2,22 +2,54 @@
 
 **Claude Code, but it runs on your Mac for free.**
 
-An AI coding agent with web search, file operations, and code execution — powered entirely by a 35-billion parameter model running locally on Apple Silicon. No cloud. No API keys. No subscription.
+No cloud. No API keys. No monthly bill. A 35-billion parameter AI agent running on a $600 Mac mini.
 
 ---
 
-## What is this?
+## Why this exists
 
-mac code is like Claude Code, but instead of paying per token, the LLM runs on your desk. It uses **Qwen3.5-35B-A3B** — a Mixture-of-Experts model with 35B total parameters but only 3B active per token — running locally via SSD flash-paging on Apple Silicon at **30 tokens/second**.
+Every AI coding agent today — Claude Code, Cursor, Copilot — sends your code to someone else's server and charges you per token. We wanted to know: **can a Mac mini on your desk do the same job?**
 
-| Setup | Speed | Cost/hr | How |
+The answer is yes. And the reason is Apple Silicon.
+
+## What makes this different
+
+**The model doesn't fit in RAM.** That's the whole point.
+
+Qwen3.5-35B-A3B is a 10.6 GB model. A Mac mini M4 has 16 GB of RAM. After macOS takes its share, there's not enough room. The overflow pages from the SSD.
+
+On any other hardware, this kills performance. We tested it:
+
+| Setup | Speed | Cost/hr | What happens |
 |---|---|---|---|
-| **mac code (Mac mini M4, 16GB)** | **29.8 tok/s** | **$0.00** | **SSD paging** |
-| Claude Code (Anthropic API) | ~80 tok/s | ~$0.50+ | Cloud API |
-| NVIDIA GPU in-VRAM (RunPod) | 42.5 tok/s | $0.34 | Cloud GPU |
-| NVIDIA GPU + NVMe (Vast.ai) | 1.6 tok/s | $0.44 | NVMe paging |
+| **Mac mini M4 + SSD paging** | **29.8 tok/s** | **$0.00** | **GPU processes everything via unified memory** |
+| NVIDIA GPU + NVMe paging | 1.6 tok/s | $0.44 | CPU bottleneck — GPU can't access paged data |
+| NVIDIA GPU + FUSE paging | 0.075 tok/s | $0.44 | Network storage — barely functional |
+| NVIDIA GPU in-VRAM (no paging) | 42.5 tok/s | $0.34 | Fast, but costs money and needs big GPU |
+| Claude Code (API) | ~80 tok/s | ~$0.50+ | Fastest, but every token costs money |
 
-The model doesn't even fit in RAM. macOS pages it from the SSD — and Apple Silicon's unified memory architecture means the GPU still processes everything. **18.6x faster than NVIDIA NVMe paging.**
+**Apple Silicon is 18.6x faster than NVIDIA when the model doesn't fit in memory.**
+
+Why? Because of **unified memory**. On a Mac, the CPU, GPU, and SSD all share the same memory address space. When macOS pages model weights from the SSD, the Metal GPU can still process them directly — no copy to a separate GPU memory, no CPU bottleneck. The data flows SSD → unified memory → GPU at 3-5 GB/s.
+
+On NVIDIA, paging forces the data through the CPU first, then across the PCIe bus to the GPU. The CPU becomes the bottleneck and the $10,000 GPU sits idle.
+
+**This is Apple's "LLM in a Flash" thesis running in practice on a $600 computer.**
+
+## Why MoE is the key
+
+The model is **Qwen3.5-35B-A3B** — a Mixture-of-Experts architecture:
+- 35 billion total parameters
+- 256 experts
+- Only **8 experts (3B parameters) activate per token**
+
+This means at any moment, 90% of the model is "cold." Cold experts sit on the SSD. Hot experts stay cached in RAM. The GPU only needs the active 3B to generate each token, so the SSD paging overhead is minimal.
+
+Dense models can't do this. A 35B dense model would need every parameter for every token. MoE + Apple Silicon SSD paging is the combination that makes local AI practical on consumer hardware.
+
+## The result
+
+A fully autonomous AI agent with web search, file operations, code execution, and 19 slash commands — running at **30 tokens per second** on a Mac mini that costs $599 once and $4/month in electricity.
 
 ---
 
