@@ -313,17 +313,63 @@ def quick_search(query):
     except Exception:
         search_query = query
 
-    # Step 2: DuckDuckGo search — grab 10 results for better coverage (~0.3s)
+    # Step 2: DuckDuckGo search — text (15 results) + news (5 results)
+    ddg = DDGS()
+    all_results = []
+
     try:
-        results = DDGS().text(search_query, max_results=10)
+        text_results = ddg.text(search_query, max_results=15)
+        all_results.extend(text_results)
     except Exception:
+        pass
+
+    try:
+        news_results = ddg.news(search_query, max_results=5)
+        all_results.extend(news_results)
+    except Exception:
+        pass
+
+    if not all_results:
         return None
 
-    if not results:
-        return None
+    # Combine all snippets
+    snippets = "\n".join([f"- {r.get('title','')}: {r.get('body','')}" for r in all_results])
 
-    # Use snippets directly — they contain the actual data
-    context = "\n".join([f"- {r['title']}: {r['body']}" for r in results])
+    # Check if snippets actually contain useful data or just meta descriptions
+    # If total snippet text is mostly generic, fetch the best page
+    import re as _re
+    page_content = ""
+    snippet_words = len(snippets.split())
+
+    # Heuristic: check if snippets have actual specific data
+    # Numbers with context (times, scores, prices) count. Generic "live scores available" doesn't.
+    specific_patterns = _re.findall(r'\d{1,2}:\d{2}\s*(?:p\.m\.|a\.m\.|ET|PT)|\$[\d,.]+|\d+-\d+(?:\s*(?:win|loss|final))', snippets.lower())
+    has_specifics = len(specific_patterns) >= 2  # need at least 2 specific data points
+
+    if not has_specifics and all_results:
+        # Snippets are weak — use Jina Reader to fetch the best page
+        # Jina reads JS-rendered pages (ESPN, etc.) that urllib can't
+        for r in all_results[:3]:
+            url = r.get("href") or r.get("link", "")
+            if not url:
+                continue
+            try:
+                jina_url = f"https://r.jina.ai/{url}"
+                req = urllib.request.Request(jina_url, headers={
+                    "User-Agent": "Mozilla/5.0",
+                    "Accept": "text/plain",
+                })
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    text = resp.read(6000).decode("utf-8", errors="ignore")
+                    if len(text) > 200:
+                        page_content = text[:4000]
+                        break
+            except Exception:
+                continue
+
+    context = snippets
+    if page_content:
+        context += f"\n\nDetailed content from top result:\n{page_content}"
 
     # Step 3: LLM answers using results (~2-3s)
     content, timings = llm_call([
