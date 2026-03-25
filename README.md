@@ -10,17 +10,18 @@ mac code is an open-source project to change that. We run frontier-class open-we
 
 ## The Breakthrough
 
-**A 35-billion parameter model with full tool calling on a $600 Mac mini.**
+**Two models on a $600 Mac mini. Both with full tool calling. Zero cloud.**
 
-Everyone said it couldn't be done — the 35B MoE model at IQ2 quantization was supposed to have "broken" instruction following. Traditional agent frameworks (PicoClaw, LangChain, etc.) use complex JSON function-call protocols that DO break at low quantization. But we discovered that if you use **the LLM itself as a simple text router** — classifying intent with one word, generating commands as plain text — it works perfectly. 8/8 intent classification, perfect shell commands, perfect search queries, all at 30 tok/s.
+| Model | What | Speed | Context | On 16 GB RAM |
+|---|---|---|---|---|
+| **Qwen3.5-35B-A3B MoE** | 35 billion params, 3B active per token | **30 tok/s** | 4K | Via SSD flash-paging |
+| **Qwen3.5-9B** | 9 billion params, all active | 16 tok/s | **64K** | Fits entirely in RAM |
 
-| Model | Speed | Tool calling | How |
-|---|---|---|---|
-| **Qwen3.5-35B-A3B (IQ2_M)** | **30 tok/s** | **8/8 correct** | LLM-as-Router (text classification) |
-| Same model via PicoClaw | 0.3 tok/s | Broken (loops forever) | JSON function calls |
-| Same model via LangChain | — | Would also break | JSON function calls |
+The 35B model doesn't fit in memory — it pages from the SSD at 30 tok/s. On NVIDIA hardware, the same paging gives you 1.6 tok/s. Apple Silicon's unified memory makes the difference.
 
-The trick: don't ask a quantized model to generate structured JSON. Ask it simple questions. "Is this a search, shell, or chat?" → "search". Done.
+The 9B runs with 64K context using quantized KV cache — enough to read entire codebases. Two flags (`--cache-type-k q4_0 --cache-type-v q4_0`) doubled the context window for free.
+
+Both models do web search, shell commands, and file operations through our LLM-as-Router architecture — the model classifies its own intent and generates its own commands, no external agent framework needed.
 
 ---
 
