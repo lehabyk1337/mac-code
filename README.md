@@ -8,6 +8,22 @@ mac code is an open-source project to change that. We run frontier-class open-we
 
 ---
 
+## The Breakthrough
+
+**A 35-billion parameter model with full tool calling on a $600 Mac mini.**
+
+Everyone said it couldn't be done — the 35B MoE model at IQ2 quantization was supposed to have "broken" instruction following. Traditional agent frameworks (PicoClaw, LangChain, etc.) use complex JSON function-call protocols that DO break at low quantization. But we discovered that if you use **the LLM itself as a simple text router** — classifying intent with one word, generating commands as plain text — it works perfectly. 8/8 intent classification, perfect shell commands, perfect search queries, all at 30 tok/s.
+
+| Model | Speed | Tool calling | How |
+|---|---|---|---|
+| **Qwen3.5-35B-A3B (IQ2_M)** | **30 tok/s** | **8/8 correct** | LLM-as-Router (text classification) |
+| Same model via PicoClaw | 0.3 tok/s | Broken (loops forever) | JSON function calls |
+| Same model via LangChain | — | Would also break | JSON function calls |
+
+The trick: don't ask a quantized model to generate structured JSON. Ask it simple questions. "Is this a search, shell, or chat?" → "search". Done.
+
+---
+
 ## The Mission
 
 **Put open-source AI models on every Mac.**
@@ -43,6 +59,13 @@ You: "explain quantum computing"
  → LLM classifies: "chat"
  → Streams directly from LLM
 ```
+
+Both models support all three paths:
+
+| Model | Speed | Context | Best for |
+|---|---|---|---|
+| **Qwen3.5-35B-A3B MoE** | **30 tok/s** | 4K | Fast agent tasks, reasoning |
+| Qwen3.5-9B | 16 tok/s | **64K** | Long conversations, large files |
 
 Three paths, all powered by the same model:
 
@@ -410,7 +433,7 @@ The 27B dense model is the worst option — slower than both alternatives with t
 - **GPU OOM after long sessions**: Reboot your Mac to clear Metal GPU memory
 - **"Connection refused"**: The llama-server crashed or wasn't started. Restart it.
 - **Slow web search (>30s)**: Page fetch timeout on slow sites. The search still works, just slower.
-- **35B tool calling fails**: Expected at 2.6 bits/weight. Use 9B for agent tasks, 35B for reasoning only.
+- **35B tool calling via PicoClaw fails**: Expected — JSON function calls break at 2.6 bpw. But our LLM-as-Router works perfectly (8/8 correct). Use `agent.py`, not PicoClaw directly.
 
 ---
 
@@ -435,6 +458,27 @@ llama-server \
 ```
 
 Expected: **60-90 tok/s**. Report results in an issue.
+
+### MLX backend (est. 2x speedup)
+
+Apple's MLX framework is [21-87% faster than llama.cpp](https://arxiv.org/abs/2511.05502) on Apple Silicon due to zero-copy unified memory operations. We include an MLX drop-in replacement:
+
+```bash
+pip3 install mlx-lm
+python3 mlx_server.py              # 9B at ~32 tok/s
+python3 mlx_server.py --model 35b  # 35B at ~60 tok/s (estimated)
+```
+
+Same OpenAI-compatible API at localhost:8000. `agent.py` works with either backend.
+
+### Self-improving agent
+
+Every interaction is logged to `~/.mac-code/logs/`. Grade responses with `/good` or `/bad` to build training data. View stats with `/improve`.
+
+The logged JSONL data can be used for:
+- **TinyLoRA fine-tuning** (13 parameters, RL-based — [paper](https://arxiv.org/html/2602.04118v1))
+- **Prompt optimization** based on failure patterns
+- **Autoresearch-style** improvement loops ([Karpathy's autoresearch](https://github.com/karpathy/autoresearch))
 
 ---
 

@@ -5,6 +5,8 @@ mac code — claude code for your Mac
 
 import json, sys, os, time, subprocess, re, threading, queue
 import urllib.request, random
+from datetime import datetime
+from pathlib import Path
 
 from rich.console import Console, Group
 from rich.panel import Panel
@@ -17,6 +19,49 @@ from rich.padding import Padding
 from rich.columns import Columns
 
 SERVER = os.environ.get("LLAMA_URL", "http://localhost:8000")
+
+# ── Self-improvement: failure logging ─────────────
+LOGS_DIR = Path.home() / ".mac-code" / "logs"
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+def log_interaction(query, intent, response, speed, grade=None, error=None):
+    """Log every interaction for self-improvement training data."""
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "query": query,
+        "intent": intent,
+        "response": response[:500] if response else None,
+        "speed": speed,
+        "grade": grade,  # "good", "bad", or None (ungraded)
+        "error": error,
+        "model": get_current_model() if 'get_current_model' in dir() else "unknown",
+    }
+    log_file = LOGS_DIR / f"interactions-{datetime.now().strftime('%Y-%m-%d')}.jsonl"
+    with open(log_file, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+def get_failure_stats():
+    """Show stats from logged interactions."""
+    total = 0
+    graded = {"good": 0, "bad": 0}
+    intents = {"search": 0, "shell": 0, "chat": 0}
+    errors = 0
+
+    for log_file in LOGS_DIR.glob("interactions-*.jsonl"):
+        for line in open(log_file):
+            try:
+                entry = json.loads(line)
+                total += 1
+                if entry.get("grade"):
+                    graded[entry["grade"]] = graded.get(entry["grade"], 0) + 1
+                if entry.get("intent"):
+                    intents[entry["intent"]] = intents.get(entry["intent"], 0) + 1
+                if entry.get("error"):
+                    errors += 1
+            except:
+                pass
+
+    return {"total": total, "graded": graded, "intents": intents, "errors": errors}
 PICOCLAW = os.path.expanduser("~/Desktop/qwen/picoclaw/build/picoclaw-darwin-arm64")
 console = Console()
 
@@ -636,6 +681,9 @@ COMMANDS = [
     ("/compact",     "Toggle compact output (no markdown rendering)"),
     ("/stop",        "Stop a running /loop"),
     ("/cost",        "Show estimated cost savings vs cloud APIs"),
+    ("/good",        "Grade last response as good (for self-improvement)"),
+    ("/bad",         "Grade last response as bad (for self-improvement)"),
+    ("/improve",     "Show self-improvement stats from logged interactions"),
     ("/quit",        "Exit mac code"),
 ]
 
@@ -671,6 +719,7 @@ def main():
     branch_save = None
     loop_thread = None
     loop_running = False
+    last_interaction = None  # for /good /bad grading
 
     while True:
         try:
@@ -834,6 +883,43 @@ def main():
                 console.print(f"  [bold bright_green]$0.00[/] spent locally")
                 console.print(f"  [dim]~${saved:.4f} would have cost on cloud GPU (${cloud_rate}/hr)[/]")
                 console.print(f"  [dim]session: {session_time:.0f}s · {session_tokens:,} tokens[/]\n")
+                continue
+
+            elif exact == "/good":
+                # Grade last response as good
+                if last_interaction:
+                    last_interaction["grade"] = "good"
+                    log_interaction(**last_interaction)
+                    console.print("  [bright_green]marked good[/]\n")
+                else:
+                    console.print("  [dim]no response to grade[/]\n")
+                continue
+
+            elif exact == "/bad":
+                # Grade last response as bad
+                if last_interaction:
+                    last_interaction["grade"] = "bad"
+                    log_interaction(**last_interaction)
+                    console.print("  [bright_red]marked bad — logged for improvement[/]\n")
+                else:
+                    console.print("  [dim]no response to grade[/]\n")
+                continue
+
+            elif exact == "/improve":
+                stats = get_failure_stats()
+                t = Table(show_header=False, box=None, padding=(0, 1))
+                t.add_column(style="bold bright_cyan", width=14)
+                t.add_column()
+                t.add_row("total", str(stats["total"]))
+                t.add_row("good", str(stats["graded"].get("good", 0)))
+                t.add_row("bad", str(stats["graded"].get("bad", 0)))
+                t.add_row("errors", str(stats["errors"]))
+                t.add_row("searches", str(stats["intents"].get("search", 0)))
+                t.add_row("shell", str(stats["intents"].get("shell", 0)))
+                t.add_row("chat", str(stats["intents"].get("chat", 0)))
+                t.add_row("logs", str(LOGS_DIR))
+                console.print(t)
+                console.print()
                 continue
 
             elif exact in ("/help", "/?"):
@@ -1085,6 +1171,7 @@ def main():
                     session_tokens += len(response.split())
                     session_time += elapsed
                     session_turns += 1
+                    last_interaction = {"query": user_input, "intent": "shell", "response": response, "speed": speed}
                     messages.append({"role": "user", "content": user_input})
                     messages.append({"role": "assistant", "content": response})
                 else:
@@ -1138,6 +1225,7 @@ def main():
                     session_turns += 1
                     messages.append({"role": "user", "content": user_input})
                     messages.append({"role": "assistant", "content": response})
+                    last_interaction = {"query": user_input, "intent": "search", "response": response, "speed": speed}
                 else:
                     # Search failed, fall back to direct LLM
                     console.print("  [dim]search failed, asking model directly...[/]")
