@@ -9,3 +9,4 @@ picoclaw/
 *.json
 !config.example.json
 /conversations/
+research/
