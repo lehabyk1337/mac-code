@@ -112,20 +112,38 @@ Key technique: `fcntl(F_NOCACHE)` + `os.pread()` bypasses macOS Unified Buffer C
 
 ### Measured Results
 
+**Dense model (Qwen3-32B, 18.4 GB):**
+
 | Approach | Speed | Quality | RAM Used |
 |----------|-------|---------|----------|
 | llama.cpp mmap (18.4 GB on 16 GB) | 0.017 tok/s | Full 4-bit | Swap thrashing |
 | **Flash Stream v2 (F_NOCACHE)** | **0.152 tok/s** | **Full 4-bit** | **4.5 GB stable** |
 | 2-bit in-RAM (9.2 GB) | ~6 tok/s | Degraded (~60 tok) | 9.2 GB |
-| Theoretical SSD limit | 0.353 tok/s | Full 4-bit | — |
 
-Flash Stream is **9x faster than mmap thrashing** at identical quality. GPU memory stays flat at 4.5 GB across all 64 layers — verified with per-layer monitoring.
+**MoE model (Qwen3.5-35B-A3B Q4_K_M, 22 GB) — the breakthrough:**
 
-### Sample Output (387 tokens, full chain-of-thought)
+| Metric | Value |
+|--------|-------|
+| Model size | 22 GB (256 experts, 8 active per token) |
+| RAM pinned | **1.42 GB** |
+| Decode speed | **1.75 tok/s** |
+| Prefill | 3.5s (3.4 tok/s) |
+| SSD throughput | 1.3 GB/s (8-thread F_NOCACHE pread) |
+| Memory stability | 1.42 GB flat (never grows) |
 
-> "The Flash Attention paper introduces an optimized attention mechanism in transformers, focusing on improving computational and memory efficiency during the self-attention operation... FlashAttention addresses this by reorganizing computation via tiling—breaking down operations into smaller blocks that fit within hardware cache..."
+The MoE Expert Sniper reads only the 8 active experts per layer from SSD (~14 MB/layer vs 221 MB for dense). The router acts as a built-in prefetch predictor — telling us exactly which weights to load before we need them.
 
-This is coherent, factual output from the full 4-bit model streaming from SSD. The 2-bit version produces repetitive nonsense after ~60 tokens.
+### Sample Output — 35B MoE (coherent chain-of-thought)
+
+Prompt: "Explain how mixture of experts models work in one paragraph."
+
+> `<think>` Here's a thinking process that leads to the suggested explanation of Mixture of Experts (MoE): 1. **Analyze the Request:** * **Topic:** Mixture of Experts (MoE)...
+
+This is the model reasoning about its own architecture — chain-of-thought at 35B quality, streaming from SSD with only 1.42 GB in RAM.
+
+**Dense 32B sample** (387 tokens, coherent):
+
+> "The Flash Attention paper introduces an optimized attention mechanism in transformers, focusing on improving computational and memory efficiency during the self-attention operation... FlashAttention addresses this by reorganizing computation via tiling..."
 
 ### What We Discovered
 
