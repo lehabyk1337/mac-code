@@ -309,9 +309,22 @@ def main():
 
     config = AutoConfig.from_pretrained(str(original_dir), trust_remote_code=True)
 
-    # Load on meta device (no memory)
+    # Use text_config for the causal LM if it's a VLM config
+    if hasattr(config, 'text_config'):
+        text_model_config = config.text_config
+    else:
+        text_model_config = config
+
+    # Load just the text/language model on meta device
+    from transformers import AutoModelForCausalLM as AMCLM
     with torch.device("meta"):
-        model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
+        # Try loading from text config directly
+        try:
+            model = AMCLM.from_config(text_model_config, trust_remote_code=True)
+        except Exception as e:
+            print(f"  Direct config failed: {e}")
+            print("  Trying with full config...")
+            model = AMCLM.from_config(config, trust_remote_code=True)
 
     # Move to device with empty tensors
     model = model.to_empty(device=args.device)
@@ -339,7 +352,14 @@ def main():
     patched = 0
     for i in range(num_layers):
         # Find the MoE block in this layer
-        layer = model.language_model.model.layers[i]
+        # Handle both VLM (language_model.model.layers) and text-only (model.layers)
+        if hasattr(model, 'language_model'):
+            layer = model.language_model.model.layers[i]
+        elif hasattr(model, 'model'):
+            layer = model.model.layers[i]
+        else:
+            print(f"  Cannot find layers in model")
+            break
         if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'gate'):
             # This is an MoE layer — patch it
             moe_block = layer.mlp
