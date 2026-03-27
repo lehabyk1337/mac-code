@@ -351,25 +351,58 @@ class SniperEngine:
             attn_prefix = f"{prefix}.linear_attn"
 
         # Q, K, V projections (dequantize from pinned)
-        q_w = self._dequant_pinned(f"{attn_prefix}.q_proj")
-        k_w = self._dequant_pinned(f"{attn_prefix}.k_proj")
-        v_w = self._dequant_pinned(f"{attn_prefix}.v_proj")
-        o_w = self._dequant_pinned(f"{attn_prefix}.o_proj")
+        # full_attention uses q_proj/k_proj/v_proj/o_proj
+        # linear_attention uses in_proj_qkv/in_proj_a/in_proj_b/in_proj_z/out_proj
+        if layer_type == "full_attention":
+            q_w = self._dequant_pinned(f"{attn_prefix}.q_proj")
+            k_w = self._dequant_pinned(f"{attn_prefix}.k_proj")
+            v_w = self._dequant_pinned(f"{attn_prefix}.v_proj")
+            o_w = self._dequant_pinned(f"{attn_prefix}.o_proj")
+        else:
+            # Linear attention: use in_proj_qkv as combined Q/K/V, out_proj as O
+            qkv_w = self._dequant_pinned(f"{attn_prefix}.in_proj_qkv")
+            o_w = self._dequant_pinned(f"{attn_prefix}.out_proj")
+            if qkv_w is None:
+                return h
+            # Simplified: just project through qkv then out
+            x = normed.squeeze(0).squeeze(0).to(torch.float16)
+            qkv = x @ qkv_w.t()
+            # Split into thirds as simplified Q/K/V
+            third = qkv.shape[0] // 3
+            attn_out = qkv[:third]  # use Q-sized chunk
+            # Expand to match o_proj input if needed
+            o_in_dim = o_w.shape[1]
+            if attn_out.shape[0] < o_in_dim:
+                attn_out = attn_out.repeat((o_in_dim + attn_out.shape[0] - 1) // attn_out.shape[0])[:o_in_dim]
+            elif attn_out.shape[0] > o_in_dim:
+                attn_out = attn_out[:o_in_dim]
+            out = attn_out @ o_w.t()
+            del qkv_w, o_w, qkv, attn_out
+            return h + out.unsqueeze(0).unsqueeze(0)
 
         if q_w is None:
             return h  # Skip if weights not found
 
         x = normed.squeeze(0).squeeze(0).to(torch.float16)  # [hidden]
-        q = x @ q_w.t()
-        k = x @ k_w.t()
-        v = x @ v_w.t()
+        q = x @ q_w.t()  # [num_heads * head_dim]
+        k = x @ k_w.t()  # [kv_heads * head_dim]
+        v = x @ v_w.t()  # [kv_heads * head_dim]
 
-        # Simplified attention (single token, no KV cache)
-        # For single token decode, attention is just: output = V (since softmax(Q@K^T/sqrt(d)) = 1)
-        attn_out = v
+        # Simplified single-token attention with GQA expansion
+        # V has kv_heads groups, Q has num_heads. Expand V to match Q dims.
+        # For single token: softmax(Q@K^T/sqrt(d)) = 1, so attn_out = V expanded
+        kv_dim = v.shape[0]
+        q_dim = q.shape[0]
+        if kv_dim < q_dim:
+            # GQA: repeat V to match Q head count
+            repeat_factor = q_dim // kv_dim
+            attn_out = v.repeat(repeat_factor)
+        else:
+            attn_out = v
+
         out = attn_out @ o_w.t()
 
-        del q_w, k_w, v_w, o_w
+        del q_w, k_w, v_w, o_w, q, k, v, attn_out
         return h + out.unsqueeze(0).unsqueeze(0)
 
     def forward_layer_ffn(self, h, layer_idx):
