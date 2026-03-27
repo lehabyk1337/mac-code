@@ -386,6 +386,7 @@ def main():
     ]
     text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     input_ids = tokenizer.encode(text, return_tensors="pt").to(device)
+    attention_mask = torch.ones_like(input_ids)
     prompt_len = input_ids.shape[1]
     print(f"  Prompt: {prompt_len} tokens")
 
@@ -393,8 +394,10 @@ def main():
     with torch.no_grad():
         output_ids = model.generate(
             input_ids,
+            attention_mask=attention_mask,
             max_new_tokens=args.max_tokens,
             do_sample=False,
+            pad_token_id=tokenizer.eos_token_id,
         )
     t_total = time.time() - t0
 
