@@ -9,13 +9,13 @@
 | Any Mac | 8 GB | Qwen3.5-9B (Q4_K_M, 5.3 GB), 4K context | 16-20 tok/s |
 | Any Mac | 16 GB | Qwen3.5-9B (Q4_K_M, 5.3 GB), 64K context | 16-20 tok/s |
 | **Mac mini M4** | **16 GB** | **Qwen3.5-35B-A3B (IQ2_M, 10.6 GB)** | **30 tok/s** |
-| Any 16 GB Mac | 16 GB | Qwen3.5-35B-A3B Q4_K_M (22 GB) via Flash Streaming | 1.54 tok/s |
-| Any 16 GB Mac | 16 GB | Qwen3.5-27B (16.1 GB) via Flash Streaming | 0.18 tok/s |
+| Mac mini M4 | 16 GB | Qwen3.5-35B-A3B Q4_K_M (22 GB) via Flash Streaming | 1.54 tok/s |
+| Mac mini M4 | 16 GB | Qwen3.5-27B (16.1 GB) via Flash Streaming | 0.18 tok/s |
 | Mac mini M4 Pro | 48 GB | 35B at full Q4 in RAM | 30+ tok/s |
 
 > **"I wanted to run the Qwen 27B on my M2 16GB but failed. That's not possible, right?"**
 >
-> It is possible. We stream FFN weights from SSD — only 5.5 GB stays in RAM. The output is coherent, full 4-bit quality. It's slow (0.18 tok/s) but it works on **any** 16 GB Apple Silicon Mac, including M1/M2. No 2-bit compression, no mmap thrashing, no swap death. [See how it works.](#how-flash-streaming-works)
+> It is possible. We stream FFN weights from SSD — only 5.5 GB stays in RAM. The output is coherent, full 4-bit quality. It's slow (0.18 tok/s on a Mac mini M4) but the method works on any 16 GB Apple Silicon Mac. No 2-bit compression, no mmap thrashing, no swap death. [See how it works.](#how-flash-streaming-works)
 
 ---
 
