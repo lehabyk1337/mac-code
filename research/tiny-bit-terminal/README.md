@@ -1,6 +1,6 @@
 # Tiny Bit Terminal
 
-A local AI agent that runs entirely on your Mac. No cloud, no API keys. Tool calling, web search, document parsing, and multi-model compare — all from a retro terminal UI.
+A local AI agent that runs entirely on your Mac. Tool calling, web search, document parsing, and multi-model compare — all from a retro terminal UI.
 
 ```
           ______________
