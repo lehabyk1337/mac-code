@@ -5,6 +5,8 @@ Usage:
     mlx-sniper download qwen3.5-35b [-o ~/models/qwen35-35b]
     mlx-sniper calibrate <model-dir> [--quick] [--force] [--ram N]
     mlx-sniper run <model-dir> -p "prompt" [-v] [--max-tokens N]
+    mlx-sniper chat <model-dir> [--max-tokens 500]
+    mlx-sniper serve <model-dir> [--port 11434] [--host 127.0.0.1]
 """
 import argparse
 import sys
@@ -56,131 +58,116 @@ def cmd_calibrate(args):
 
 
 def cmd_run(args):
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    from .generate import load_engine, generate_stream
+    from .calibrate import load_calibration
     import mlx.core as mx
-    import numpy as np
-    from .calibrate import load_calibration, auto_size_cache
-    from .engine import MoESniperEngine35B, run_expert_ffn
-    from mlx_lm.models.base import create_attention_mask, create_ssm_mask
 
-    # Load calibration if available
     cal = load_calibration(args.model_dir)
     if cal:
-        cache_size = cal["cache_size"]
         bias = cal["routing_bias"]
-        print(f"Loaded calibration: cache={cache_size}, bias={bias}, "
+        print(f"Loaded calibration: cache={cal['cache_size']}, bias={bias}, "
               f"dead={cal['reap_dead_pct']:.1%}")
     else:
-        cache_size, _, _ = auto_size_cache(args.model_dir)
         bias = 0.0
-        print(f"No calibration found. Using defaults: cache={cache_size}, bias=0.0")
-        print(f"Run 'mlx-sniper calibrate {args.model_dir}' for optimal performance.")
+        print(f"No calibration found. Run 'mlx-sniper calibrate {args.model_dir}'")
 
-    # Patch MODEL_DIR in engine module
-    from . import engine as engine_mod
-    engine_mod.MODEL_DIR = args.model_dir
-
-    eng = MoESniperEngine35B(cache_size=cache_size, enable_prediction=True)
-    eng.load()
-    eng.reset_cache()
+    eng, bias_loaded, _ = load_engine(args.model_dir)
+    bias = bias_loaded
     print(f"Model loaded. Metal: {mx.get_active_memory()/1e9:.2f} GB")
 
-    tok = eng.tokenizer
     messages = [{"role": "user", "content": args.prompt}]
-    try:
-        text = tok.apply_chat_template(messages, tokenize=False,
-                                        add_generation_prompt=True, enable_thinking=False)
-    except:
-        text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    tokens = tok.encode(text)
-    input_ids = mx.array([tokens])
-
-    # Forward with bias
-    def biased_forward(inp):
-        h = eng.model.model.embed_tokens(inp)
-        fa_mask = create_attention_mask(h, eng.cache[eng.model.model.fa_idx])
-        ssm_mask = create_ssm_mask(h, eng.cache[eng.model.model.ssm_idx])
-        for i in range(eng.num_layers):
-            layer = eng.model.model.layers[i]
-            mask = ssm_mask if layer.is_linear else fa_mask
-            normed = layer.input_layernorm(h)
-            if layer.is_linear:
-                attn_out = layer.linear_attn(normed, mask=mask, cache=eng.cache[i])
-            else:
-                attn_out = layer.self_attn(normed, mask=mask, cache=eng.cache[i])
-            h = h + attn_out
-            mx.eval(h)
-            normed = layer.post_attention_layernorm(h)
-            raw_logits = layer.mlp.gate(normed)
-            if bias > 0 and eng.reader.lru is not None:
-                cached_mask = np.zeros(256, dtype=np.float32)
-                for eid in range(256):
-                    if eng.reader.lru.get(i, eid) is not None:
-                        cached_mask[eid] = bias
-                raw_logits = raw_logits + mx.array(cached_mask).reshape(1, -1)
-            gates = mx.softmax(raw_logits, axis=-1, precise=True)
-            k = layer.mlp.top_k
-            inds = mx.argpartition(gates, kth=-k, axis=-1)[..., -k:]
-            scores = mx.take_along_axis(gates, inds, axis=-1)
-            if layer.mlp.norm_topk_prob:
-                scores = scores / scores.sum(axis=-1, keepdims=True)
-            mx.eval(inds, scores)
-            active_ids = list(set(int(e) for e in np.array(inds).flatten()))
-            eng.coact.record_layer(i, active_ids)
-            if eng.coact.ready and i + 1 < eng.num_layers:
-                predicted = eng.coact.predict_next_layer(i, active_ids, top_k=6)
-                if predicted:
-                    to_fetch = [eid for eid in predicted
-                                if eng.reader.lru and eng.reader.lru.get(i+1, eid) is None]
-                    if to_fetch:
-                        eng.reader.prefetch_experts(i+1, to_fetch)
-            if i + 1 < eng.num_layers:
-                eng.reader.prefetch_experts(i+1, active_ids)
-            expert_data = eng.reader.get_experts(i, active_ids)
-            expert_out = run_expert_ffn(normed, expert_data, inds, scores)
-            shared_out = layer.mlp.shared_expert(normed)
-            shared_gate = mx.sigmoid(layer.mlp.shared_expert_gate(normed))
-            if shared_gate.ndim < shared_out.ndim:
-                shared_gate = shared_gate[..., None]
-            expert_out = expert_out + shared_gate * shared_out
-            h = h + expert_out
-            mx.eval(h)
-            del expert_data, expert_out, normed, attn_out
-            mx.clear_cache()
-        eng.coact.end_token()
-        h = eng.model.model.norm(h)
-        return eng.model.lm_head(h)
 
     t0 = time.time()
-    logits = biased_forward(input_ids)
-    mx.eval(logits)
-    ttft = time.time() - t0
+    token_count = 0
+    first_token_time = None
 
-    generated = []
-    for _ in range(args.max_tokens):
-        token = mx.argmax(logits[:, -1, :], axis=-1)
-        mx.eval(token)
-        tid = token.item()
-        if tid in (248044, 248045):
-            break
-        generated.append(tid)
-        chunk = tok.decode([tid])
+    for chunk in generate_stream(eng, messages, bias=bias, max_tokens=args.max_tokens):
+        if first_token_time is None:
+            first_token_time = time.time()
         sys.stdout.write(chunk)
         sys.stdout.flush()
-        logits = biased_forward(token.reshape(1, 1))
-        mx.eval(logits)
+        token_count += 1
 
     elapsed = time.time() - t0
-    n = len(generated)
-    tps = n / (elapsed - ttft) if elapsed > ttft else 0
+    ttft = (first_token_time - t0) if first_token_time else elapsed
+    tps = token_count / (elapsed - ttft) if elapsed > ttft and token_count > 0 else 0
 
     if args.verbose:
-        print(f"\n\n  {n} tokens | {tps:.2f} tok/s | TTFT: {ttft:.2f}s | "
+        print(f"\n\n  {token_count} tokens | {tps:.2f} tok/s | TTFT: {ttft:.2f}s | "
               f"Total: {elapsed:.2f}s")
         print(f"  Cache: {eng.reader.stats()}")
         print(f"  Metal: {mx.get_active_memory()/1e9:.2f} GB")
     else:
         print()
+
+
+def cmd_chat(args):
+    from .generate import load_engine, generate_stream
+    from .calibrate import load_calibration
+    import mlx.core as mx
+
+    cal = load_calibration(args.model_dir)
+    bias = cal["routing_bias"] if cal else 0.0
+
+    print("Loading model...", end=" ", flush=True)
+    eng, bias_loaded, _ = load_engine(args.model_dir)
+    bias = bias_loaded
+    print(f"ready. ({mx.get_active_memory()/1e9:.1f} GB)")
+    print(f"Type your message. /clear to reset, /stats for info, /quit to exit.\n")
+
+    messages = []
+    session_tokens = 0
+    session_time = 0.0
+
+    while True:
+        try:
+            user_input = input("> ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\n\nbye.")
+            break
+
+        if not user_input:
+            continue
+
+        if user_input.lower() in ("/quit", "/exit", "/q"):
+            print("bye.")
+            break
+
+        if user_input.lower() == "/clear":
+            messages.clear()
+            print("  (conversation cleared)\n")
+            continue
+
+        if user_input.lower() == "/stats":
+            avg_tps = session_tokens / session_time if session_time > 0 else 0
+            print(f"  Tokens: {session_tokens}")
+            print(f"  Time:   {session_time:.1f}s")
+            print(f"  Speed:  {avg_tps:.1f} tok/s")
+            print(f"  Cache:  {eng.reader.stats()}")
+            print(f"  Metal:  {mx.get_active_memory()/1e9:.1f} GB\n")
+            continue
+
+        messages.append({"role": "user", "content": user_input})
+
+        t0 = time.time()
+        token_count = 0
+        full_response = ""
+
+        print()
+        for chunk in generate_stream(eng, messages, bias=bias, max_tokens=args.max_tokens):
+            sys.stdout.write(chunk)
+            sys.stdout.flush()
+            full_response += chunk
+            token_count += 1
+
+        elapsed = time.time() - t0
+        tps = token_count / elapsed if elapsed > 0 else 0
+        session_tokens += token_count
+        session_time += elapsed
+
+        print(f"\n\n[{token_count} tok, {tps:.1f} tok/s]\n")
+
+        messages.append({"role": "assistant", "content": full_response})
 
 
 def main():
@@ -193,15 +180,15 @@ def main():
     # download
     p = sub.add_parser("download", help="Download, preprocess, and calibrate a model")
     p.add_argument("model_name", help="Model name (e.g. qwen3.5-35b) or 'list'")
-    p.add_argument("-o", "--output", default=None, help="Output directory (default: ~/models/<name>)")
-    p.add_argument("--full-calibrate", action="store_true", help="Run full calibration with bias sweep")
-    p.add_argument("--keep-download", action="store_true", help="Keep raw HF download after preprocessing")
+    p.add_argument("-o", "--output", default=None, help="Output directory")
+    p.add_argument("--full-calibrate", action="store_true", help="Full calibration with bias sweep")
+    p.add_argument("--keep-download", action="store_true", help="Keep raw HF download")
 
     # serve
     p = sub.add_parser("serve", help="Ollama-compatible HTTP server")
     p.add_argument("model_dir", help="Path to sniper model directory")
     p.add_argument("--port", type=int, default=11434, help="Port (default: 11434)")
-    p.add_argument("--host", default="127.0.0.1", help="Host (default: 127.0.0.1, use 0.0.0.0 for network)")
+    p.add_argument("--host", default="127.0.0.1", help="Host (use 0.0.0.0 for network)")
 
     # calibrate
     p = sub.add_parser("calibrate", help="One-time model calibration (~2-8 min)")
@@ -217,12 +204,24 @@ def main():
     p.add_argument("--max-tokens", type=int, default=200)
     p.add_argument("--verbose", "-v", action="store_true")
 
+    # chat
+    p = sub.add_parser("chat", help="Interactive multi-turn chat")
+    p.add_argument("model_dir", help="Path to sniper model directory")
+    p.add_argument("--max-tokens", type=int, default=500)
+
     args = parser.parse_args()
     if args.command is None:
         parser.print_help()
         sys.exit(1)
 
-    {"download": cmd_download, "serve": cmd_serve, "calibrate": cmd_calibrate, "run": cmd_run}[args.command](args)
+    cmds = {
+        "download": cmd_download,
+        "serve": cmd_serve,
+        "calibrate": cmd_calibrate,
+        "run": cmd_run,
+        "chat": cmd_chat,
+    }
+    cmds[args.command](args)
 
 
 if __name__ == "__main__":
