@@ -75,8 +75,9 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     def __call__(self, x: mx.array) -> mx.array:
-        # Gemma 4 GGUF norm_shift=0.0, stores raw offsets. Apply (1+w).
-        return mx.fast.rms_norm(x, 1.0 + self.weight, self.eps)
+        # Gemma 4 GGUF norm_shift=0.0: weight is the final multiplier (no +1 offset)
+        # Confirmed by mlx-vlm RMSNormZeroShift implementation
+        return mx.fast.rms_norm(x, self.weight, self.eps)
 
 
 class BareRMSNorm(nn.Module):
