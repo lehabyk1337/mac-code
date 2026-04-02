@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MoE Sniper — Qwen3-30B-A3B via SSD streaming on M4 Mac Mini."""
+"""MoE Sniper — Qwen3.5-35B-A3B via SSD streaming on M4 Mac Mini."""
 import json, sys, os, time, gc
 import numpy as np
 import mlx.core as mx
@@ -8,7 +8,7 @@ from mlx.utils import tree_flatten
 from .expert_io import MoEExpertReader
 from .coactivation import CoActivationTracker
 
-MODEL_DIR = "/Users/bigneek/models/qwen3-30b-stream"
+MODEL_DIR = "/Users/bigneek/models/qwen35-35b-stream"
 BITS = 4
 GROUP_SIZE = 64
 
@@ -42,24 +42,24 @@ def run_expert_ffn(x, expert_data, top_k_indices, top_k_weights):
     return out
 
 
-class MoESniperEngine30B:
+class MoESniperEngineNext:
     def __init__(self, cache_size=3000, enable_prediction=True):
         self.model = None
         self.reader = None
         self.tokenizer = None
         self.cache = None
-        self.num_layers = 48
+        self.num_layers = 40
         self.coact = None
         self._cache_size = cache_size
         self._enable_prediction = enable_prediction
 
     def load(self):
-        with open(f"{MODEL_DIR}/config.json") as f:
+        with open(os.path.join(MODEL_DIR, "config.json")) as f:
             config = json.load(f)
         self.num_layers = config["num_hidden_layers"]
         streaming = config["streaming"]
 
-        from mlx_lm.models.qwen3_moe import Model, ModelArgs
+        from mlx_lm.models.qwen3_next import Model, ModelArgs
         args = ModelArgs(
             model_type=config.get("model_type"),
             hidden_size=config["hidden_size"],
@@ -68,17 +68,24 @@ class MoESniperEngine30B:
             num_key_value_heads=config["num_key_value_heads"],
             rms_norm_eps=config["rms_norm_eps"],
             vocab_size=config["vocab_size"],
-            max_position_embeddings=config.get("max_position_embeddings", 40960),
+            max_position_embeddings=config.get("max_position_embeddings", 262144),
             head_dim=config.get("head_dim"),
-            tie_word_embeddings=config.get("tie_word_embeddings", True),
+            tie_word_embeddings=config.get("tie_word_embeddings", False),
             num_experts=config["num_experts"],
             num_experts_per_tok=config["num_experts_per_tok"],
+            shared_expert_intermediate_size=config.get("shared_expert_intermediate_size"),
             moe_intermediate_size=config["moe_intermediate_size"],
-            norm_topk_prob=config.get("norm_topk_prob", True),
-            intermediate_size=config.get("intermediate_size", 6144),
+            linear_num_value_heads=config.get("linear_num_value_heads"),
+            linear_num_key_heads=config.get("linear_num_key_heads"),
+            linear_key_head_dim=config.get("linear_key_head_dim"),
+            linear_value_head_dim=config.get("linear_value_head_dim"),
+            linear_conv_kernel_dim=config.get("linear_conv_kernel_dim"),
+            full_attention_interval=config.get("full_attention_interval"),
+            partial_rotary_factor=config.get("partial_rotary_factor", 0.25),
+            intermediate_size=config.get("intermediate_size", 5120),
             decoder_sparse_step=config.get("decoder_sparse_step", 1),
             mlp_only_layers=config.get("mlp_only_layers", []),
-            rope_theta=config.get("rope_theta", 1000000.0),
+            rope_theta=config.get("rope_theta", 10000000),
         )
 
         self.model = Model(args)
@@ -89,13 +96,15 @@ class MoESniperEngine30B:
             if isinstance(module, SwitchLinear): return True
             if not isinstance(module, nn.Linear): return False
             return model_pred(path, module)
-        nn.quantize(self.model, group_size=GROUP_SIZE, bits=BITS, class_predicate=should_quantize)
+        nn.quantize(self.model, group_size=GROUP_SIZE, bits=BITS,
+                     class_predicate=should_quantize)
 
         mx.set_memory_limit(14 * 1024**3)
         mx.set_cache_limit(512 * 1024**2)
 
-        pinned = mx.load(f"{MODEL_DIR}/pinned.safetensors")
-        self.model.load_weights(list(pinned.items()), strict=False)
+        pinned = mx.load(os.path.join(MODEL_DIR, "pinned.safetensors"))
+        stripped = [(k.replace("language_model.", "", 1), v) for k, v in pinned.items()]
+        self.model.load_weights(stripped, strict=False)
         params = [p for name, p in tree_flatten(self.model.parameters()) if "switch_mlp" not in name]
         mx.eval(*params)
         del pinned; gc.collect(); mx.clear_cache()
@@ -106,22 +115,26 @@ class MoESniperEngine30B:
         self.coact = CoActivationTracker(self.num_layers, warmup_tokens=3)
 
         from transformers import AutoTokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3.5-35B-A3B", trust_remote_code=True)
         return pinned_gb
 
     def reset_cache(self):
-        from mlx_lm.models.cache import KVCache
-        self.cache = [KVCache() for _ in range(self.num_layers)]
+        self.cache = self.model.make_cache()
 
     def forward(self, input_ids):
-        from mlx_lm.models.base import create_attention_mask
+        from mlx_lm.models.base import create_attention_mask, create_ssm_mask
         h = self.model.model.embed_tokens(input_ids)
-        mask = create_attention_mask(h, self.cache[0])
+        fa_mask = create_attention_mask(h, self.cache[self.model.model.fa_idx])
+        ssm_mask = create_ssm_mask(h, self.cache[self.model.model.ssm_idx])
 
         for i in range(self.num_layers):
             layer = self.model.model.layers[i]
+            mask = ssm_mask if layer.is_linear else fa_mask
             normed = layer.input_layernorm(h)
-            attn_out = layer.self_attn(normed, mask=mask, cache=self.cache[i])
+            if layer.is_linear:
+                attn_out = layer.linear_attn(normed, mask=mask, cache=self.cache[i])
+            else:
+                attn_out = layer.self_attn(normed, mask=mask, cache=self.cache[i])
             h = h + attn_out
             mx.eval(h)
 
@@ -137,29 +150,29 @@ class MoESniperEngine30B:
 
             active_ids = list(set(int(e) for e in np.array(inds).flatten()))
 
-            # Record co-activation for learning
             self.coact.record_layer(i, active_ids)
 
-            # Predictive prefetch: use co-activation to prefetch next layer
-            if self.coact.ready and i + 1 < self.num_layers:
+            # Predictive prefetch
+            if self._enable_prediction and self.coact.ready and i + 1 < self.num_layers:
                 predicted = self.coact.predict_next_layer(i, active_ids, top_k=6)
-                # Score prediction against what actually fires (for stats)
-                # (actual scoring happens next iteration when we see layer i+1)
-                # Prefetch predicted experts not already cached
                 if predicted:
-                    to_fetch = []
-                    for eid in predicted:
-                        if self.reader.lru and self.reader.lru.get(i + 1, eid) is None:
-                            to_fetch.append(eid)
+                    to_fetch = [eid for eid in predicted
+                                if self.reader.lru and self.reader.lru.get(i + 1, eid) is None]
                     if to_fetch:
                         self.reader.prefetch_experts(i + 1, to_fetch)
 
-            # Also do the standard 1-layer-ahead prefetch with router-selected IDs
+            # Standard prefetch
             if i + 1 < self.num_layers:
                 self.reader.prefetch_experts(i + 1, active_ids)
 
             expert_data = self.reader.get_experts(i, active_ids)
             expert_out = run_expert_ffn(normed, expert_data, inds, scores)
+
+            shared_out = layer.mlp.shared_expert(normed)
+            shared_gate = mx.sigmoid(layer.mlp.shared_expert_gate(normed))
+            if shared_gate.ndim < shared_out.ndim:
+                shared_gate = shared_gate[..., None]
+            expert_out = expert_out + shared_gate * shared_out
 
             h = h + expert_out
             mx.eval(h)
@@ -167,6 +180,5 @@ class MoESniperEngine30B:
             mx.clear_cache()
 
         self.coact.end_token()
-
         h = self.model.model.norm(h)
         return self.model.lm_head(h)

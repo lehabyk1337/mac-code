@@ -12,6 +12,7 @@ PAGE_SIZE = 16384
 
 # Supported models: name → HuggingFace repo
 MODEL_REGISTRY = {
+    # 16 GB Macs
     "qwen3.5-35b": {
         "repo": "mlx-community/Qwen3.5-35B-A3B-4bit",
         "default_dir": "qwen35-35b-stream",
@@ -20,7 +21,29 @@ MODEL_REGISTRY = {
     "qwen3-30b": {
         "repo": "mlx-community/Qwen3-30B-A3B-4bit",
         "default_dir": "qwen3-30b-stream",
-        "description": "Qwen3-30B-A3B 4-bit (17.2 GB, 128 experts, 3.3 tok/s on M4 16GB)",
+        "description": "Qwen3-30B-A3B 4-bit (17.2 GB, 128 experts, 4.3 tok/s on M4 16GB)",
+    },
+    "qwen3-coder-30b": {
+        "repo": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+        "default_dir": "qwen3-coder-30b-stream",
+        "description": "Qwen3-Coder-30B-A3B 4-bit (17.2 GB, 128 experts, coding model)",
+    },
+    # 32 GB Macs
+    "qwen3.5-122b": {
+        "repo": "mlx-community/Qwen3.5-122B-A10B-4bit",
+        "default_dir": "qwen35-122b-stream",
+        "description": "Qwen3.5-122B-A10B 4-bit (~65 GB, 256 experts, needs 32+ GB RAM)",
+    },
+    "qwen3-next-80b": {
+        "repo": "mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit",
+        "default_dir": "qwen3-next-80b-stream",
+        "description": "Qwen3-Next-80B-A3B 4-bit (~40 GB, 512 experts, needs 32+ GB RAM)",
+    },
+    # 64 GB+ Macs
+    "qwen3-235b": {
+        "repo": "mlx-community/Qwen3-235B-A22B-Instruct-2507-4bit",
+        "default_dir": "qwen3-235b-stream",
+        "description": "Qwen3-235B-A22B 4-bit (~130 GB, 128 experts, needs 64+ GB RAM)",
     },
 }
 
@@ -34,8 +57,18 @@ TENSOR_ORDER = [
 def list_models():
     """Print available models."""
     print("Available models:\n")
+    print("  16 GB Macs:")
     for name, info in MODEL_REGISTRY.items():
-        print(f"  {name:<20} {info['description']}")
+        if "16GB" in info["description"] or "coding" in info["description"]:
+            print(f"    {name:<22} {info['description']}")
+    print("\n  32 GB+ Macs:")
+    for name, info in MODEL_REGISTRY.items():
+        if "32+" in info["description"]:
+            print(f"    {name:<22} {info['description']}")
+    print("\n  64 GB+ Macs:")
+    for name, info in MODEL_REGISTRY.items():
+        if "64+" in info["description"]:
+            print(f"    {name:<22} {info['description']}")
     print(f"\nUsage: mlx-sniper download <model-name> [-o output_dir]")
 
 

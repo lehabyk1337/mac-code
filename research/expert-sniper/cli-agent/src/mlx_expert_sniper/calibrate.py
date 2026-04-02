@@ -63,7 +63,11 @@ def _detect_model_type(model_dir):
 def _build_engine(model_dir, cache_size):
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     model_type = _detect_model_type(model_dir)
-    if "qwen3_5" in model_type:
+    if "qwen3_next" in model_type:
+        from .engine_next import MoESniperEngineNext as EngineClass
+        from . import engine_next as engine_mod
+        engine_mod.MODEL_DIR = model_dir
+    elif "qwen3_5" in model_type:
         from .engine import MoESniperEngine35B as EngineClass
         from . import engine as engine_mod
         engine_mod.MODEL_DIR = model_dir
@@ -80,8 +84,8 @@ def run_shared_calibration_pass(engine, prompts, tokens_per_prompt=20):
     """Single pass: records REAP scores AND co-activation matrix."""
     import mlx.core as mx
     from .engine import run_expert_ffn
-    from . import engine as moe_agent_35b
-    model_dir = moe_agent_35b.MODEL_DIR
+    # Get model_dir from the engine's reader
+    model_dir = os.path.dirname(engine.reader.expert_dir)
     config = json.load(open(os.path.join(model_dir, "config.json")))
     num_layers = config["num_hidden_layers"]
     num_experts = config["num_experts"]
@@ -163,8 +167,11 @@ def run_shared_calibration_pass(engine, prompts, tokens_per_prompt=20):
         try:
             text = tok.apply_chat_template(messages, tokenize=False,
                                             add_generation_prompt=True, enable_thinking=False)
-        except:
-            text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        except Exception:
+            try:
+                text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            except Exception:
+                text = messages[-1]["content"]
         tokens = tok.encode(text)
         input_ids = mx.array([tokens])
         logits = instrumented_forward(input_ids)

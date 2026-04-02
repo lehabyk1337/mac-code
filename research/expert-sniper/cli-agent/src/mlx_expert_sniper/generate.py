@@ -20,7 +20,11 @@ def load_engine(model_dir):
         bias = 0.0
 
     model_type = _detect_model_type(model_dir)
-    if "qwen3_5" in model_type:
+    if "qwen3_next" in model_type:
+        from . import engine_next as engine_mod
+        engine_mod.MODEL_DIR = model_dir
+        from .engine_next import MoESniperEngineNext as EngineClass
+    elif "qwen3_5" in model_type:
         from . import engine as engine_mod
         engine_mod.MODEL_DIR = model_dir
         from .engine import MoESniperEngine35B as EngineClass
@@ -49,7 +53,10 @@ def generate_stream(engine, messages, bias=0.0, max_tokens=200):
         text = tok.apply_chat_template(messages, tokenize=False,
                                         add_generation_prompt=True, enable_thinking=False)
     except Exception:
-        text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        try:
+            text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        except Exception:
+            text = messages[-1]["content"]
     tokens = tok.encode(text)
     input_ids = mx.array([tokens])
 
