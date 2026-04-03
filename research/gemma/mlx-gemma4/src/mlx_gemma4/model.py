@@ -279,88 +279,45 @@ class Router(nn.Module):
 # Expert Block
 # --------------------------------------------------------------------------- #
 
+class GELUGate(nn.Module):
+    """GELU gated activation for MoE (replaces SwiGLU)."""
+    def __call__(self, gate, up):
+        return nn.gelu_approx(gate) * up
+
+
 class Experts(nn.Module):
     """
-    Fused MoE experts using gather_mm for efficient batched expert dispatch.
+    MoE experts using SwitchGLU from mlx-lm.
 
-    Weight shapes (from HuggingFace):
-      gate_up_proj: [num_experts, 2 * moe_intermediate_size, hidden_size]
-      down_proj:    [num_experts, hidden_size, moe_intermediate_size]
+    Uses separate gate_proj + up_proj (not fused gate_up_proj) for
+    compatibility with mlx-lm's SwitchLinear quantization.
 
-    ### SNIPER ENGINE NOTE ###
-    # In production, gate_up_proj and down_proj are NOT resident in memory.
-    # They are loaded from SSD on-demand by the expert sniper engine.
-    # The weights here serve as placeholders for the model structure.
-    # The sniper engine will intercept expert dispatch and handle I/O.
-    ### END NOTE ###
+    The sanitize method splits fused gate_up_proj → gate_proj + up_proj.
     """
     def __init__(self, args: ModelArgs):
         super().__init__()
-        self.num_experts = args.num_experts
-        self.moe_intermediate_size = args.moe_intermediate_size
-        self.hidden_size = args.hidden_size
-
-        # [num_experts, 2*moe_intermediate, hidden_size] -- SSD-backed in production
-        self.gate_up_proj = mx.zeros(
-            (args.num_experts, 2 * args.moe_intermediate_size, args.hidden_size)
-        )
-        # [num_experts, hidden_size, moe_intermediate] -- SSD-backed in production
-        self.down_proj = mx.zeros(
-            (args.num_experts, args.hidden_size, args.moe_intermediate_size)
+        from mlx_lm.models.switch_layers import SwitchGLU
+        self.switch_glu = SwitchGLU(
+            input_dims=args.hidden_size,
+            hidden_dims=args.moe_intermediate_size,
+            num_experts=args.num_experts,
+            activation=GELUGate(),
+            bias=False,
         )
 
-    def __call__(
-        self,
-        x: mx.array,
-        indices: mx.array,
-    ) -> mx.array:
+    def __call__(self, x: mx.array, indices: mx.array) -> mx.array:
         """
         Args:
-            x: [B, L, D] input hidden states
-            indices: [B, L, top_k] expert indices
+            x: [B*L, D] or [B, L, D]
+            indices: [B*L, top_k] or [B, L, top_k]
 
-        Returns:
-            Expert outputs [B, L, top_k, D] before weighted sum
+        Returns: [B*L, top_k, D] or [B, L, top_k, D]
         """
-        # Expand for gather_mm: [B*L, 1, 1, D]
         if x.ndim == 3:
             B, L, D = x.shape
-            x_flat = x.reshape(-1, D)
-        else:
-            x_flat = x
-            B, L = None, None
-
-        x_expanded = mx.expand_dims(mx.expand_dims(x_flat, -2), -2)
-
-        # gate_up_proj is [E, 2*I, D], we need [E, D, 2*I] for matmul
-        # gather_mm expects rhs as [E, D, O] indexed by expert indices
-        gate_up_out = mx.gather_mm(
-            x_expanded,
-            self.gate_up_proj.swapaxes(-1, -2),
-            rhs_indices=indices.reshape(-1, indices.shape[-1]) if B is not None else indices,
-        )
-        # gate_up_out: [B*L, top_k, 1, 2*I]
-        gate_up_out = gate_up_out.squeeze(-2)
-
-        # Split into gate and up
-        gate, up = mx.split(gate_up_out, 2, axis=-1)
-        # Apply gelu activation (gelu_pytorch_tanh)
-        hidden = nn.gelu_approx(gate) * up
-
-        # down_proj: [E, D, I] -- already in the right shape for gather_mm
-        hidden_expanded = mx.expand_dims(hidden, -2)
-        out = mx.gather_mm(
-            hidden_expanded,
-            self.down_proj.swapaxes(-1, -2),
-            rhs_indices=indices.reshape(-1, indices.shape[-1]) if B is not None else indices,
-        )
-        # out: [B*L, top_k, 1, D]
-        out = out.squeeze(-2)
-
-        if B is not None:
-            out = out.reshape(B, L, indices.shape[-1], -1)
-
-        return out
+            out = self.switch_glu(x.reshape(-1, D), indices.reshape(-1, indices.shape[-1]))
+            return out.reshape(B, L, indices.shape[-1], -1)
+        return self.switch_glu(x, indices)
 
 
 # --------------------------------------------------------------------------- #
@@ -623,7 +580,8 @@ class Model(nn.Module):
             if new_key.startswith("model.language_model."):
                 new_key = "model." + new_key[len("model.language_model."):]
 
-            # per_layer_input_gate is now nn.Linear, loads naturally
+            # layer_scalar.weight → layer_scalar (bare parameter, not a module)
+            new_key = new_key.replace("layer_scalar.weight", "layer_scalar")
 
             # Drop v_proj only for full attention layers with K=V sharing
             # Sliding layers still need v_proj even when attention_k_eq_v is true
@@ -639,6 +597,24 @@ class Model(nn.Module):
             # Drop lm_head when tied
             if self.args.tie_word_embeddings and new_key == "lm_head.weight":
                 continue
+
+            # Split fused gate_up_proj → gate_proj + up_proj for SwitchGLU
+            if "experts.gate_up_proj" in new_key:
+                # Map: experts.gate_up_proj.X → experts.switch_glu.gate_proj.X
+                #                               + experts.switch_glu.up_proj.X
+                suffix = new_key.split("experts.gate_up_proj")[-1]  # .weight/.scales/.biases
+                base = new_key.split("experts.gate_up_proj")[0]
+                # Split along first expert-local dim (dim 1 for [E, 2*I, D])
+                half = v.shape[1] // 2
+                gate_v = v[:, :half]
+                up_v = v[:, half:]
+                new_weights[base + "experts.switch_glu.gate_proj" + suffix] = gate_v
+                new_weights[base + "experts.switch_glu.up_proj" + suffix] = up_v
+                continue
+
+            # Map experts.down_proj → experts.switch_glu.down_proj
+            if "experts.down_proj" in new_key:
+                new_key = new_key.replace("experts.down_proj", "experts.switch_glu.down_proj")
 
             new_weights[new_key] = v
 
