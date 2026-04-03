@@ -57,6 +57,10 @@ class ModelArgs(BaseModelArgs):
     enable_moe_block: bool = True
     tie_word_embeddings: bool = True
     layer_types: List[str] = field(default_factory=_default_layer_types)
+    # KV sharing: last N layers share k_proj/k_norm with a base layer
+    num_kv_shared_layers: int = 0
+    # Per-layer embedding (PLE): injects per-layer input before attention
+    hidden_size_per_layer_input: int = 0
     # RoPE
     rope_theta_sliding: float = 10_000.0
     rope_theta_global: float = 1_000_000.0
@@ -391,12 +395,32 @@ class DecoderLayer(nn.Module):
         # Per-layer learned scalar multiplier
         self.layer_scalar = mx.ones((1,))
 
+        # PLE: per-layer embedding injection
+        self.has_ple = (args.hidden_size_per_layer_input or 0) > 0
+        if self.has_ple:
+            ple_dim = args.hidden_size_per_layer_input
+            # Gate: Linear(hidden_size, ple_dim) → sigmoid → element-wise gate
+            self.per_layer_input_gate = nn.Linear(args.hidden_size, ple_dim, bias=False)
+            # Projection: Linear(ple_dim, hidden_size) → project back to hidden
+            self.per_layer_projection = nn.Linear(ple_dim, args.hidden_size, bias=False)
+            self.post_per_layer_input_norm = RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
+
     def __call__(
         self,
         x: mx.array,
         mask: Optional[mx.array] = None,
         cache: Optional[Any] = None,
+        per_layer_input: Optional[mx.array] = None,
     ) -> mx.array:
+        # 0. PLE injection (before attention)
+        if self.has_ple and per_layer_input is not None:
+            # Gate: hidden_states → sigmoid → element-wise multiply with PLE input
+            gate = mx.sigmoid(self.per_layer_input_gate(x))  # [B, L, ple_dim]
+            gated_input = gate * per_layer_input  # [B, L, ple_dim]
+            ple_out = self.per_layer_projection(gated_input)  # [B, L, hidden_size]
+            ple_out = self.post_per_layer_input_norm(ple_out)
+            x = x + ple_out
+
         # 1. Attention with pre/post norms and residual
         residual = x
         h = self.input_layernorm(x)
@@ -455,6 +479,21 @@ class Gemma4TextModel(nn.Module):
         ]
         self.norm = RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
 
+        # KV sharing: last N layers share k_proj/k_norm with base layer
+        num_shared = getattr(args, "num_kv_shared_layers", 0) or 0
+        if num_shared > 0:
+            base = args.num_hidden_layers - num_shared - 1
+            for i in range(base + 1, args.num_hidden_layers):
+                self.layers[i].self_attn.k_proj = self.layers[base].self_attn.k_proj
+                self.layers[i].self_attn.k_norm = self.layers[base].self_attn.k_norm
+
+        # PLE embedding (separate from main embedding, no sqrt scaling)
+        self.has_ple = (args.hidden_size_per_layer_input or 0) > 0
+        if self.has_ple:
+            self.per_layer_embed_tokens = nn.Embedding(
+                args.vocab_size, args.hidden_size_per_layer_input
+            )
+
     def __call__(
         self,
         inputs: mx.array,
@@ -493,10 +532,15 @@ class Gemma4TextModel(nn.Module):
             window_size=self.args.sliding_window,
         )
 
+        # PLE: compute per-layer input embedding (no sqrt scaling)
+        ple_input = None
+        if self.has_ple:
+            ple_input = self.per_layer_embed_tokens(inputs)
+
         for i, (layer, c) in enumerate(zip(self.layers, cache)):
             is_global = self.args.layer_types[i] == "full_attention"
             mask = global_mask if is_global else sliding_mask
-            h = layer(h, mask, c)
+            h = layer(h, mask, c, per_layer_input=ple_input)
 
         return self.norm(h)
 
@@ -564,6 +608,8 @@ class Model(nn.Module):
             new_key = k
             if new_key.startswith("model.language_model."):
                 new_key = "model." + new_key[len("model.language_model."):]
+
+            # per_layer_input_gate is now nn.Linear, loads naturally
 
             # Drop v_proj only for full attention layers with K=V sharing
             # Sliding layers still need v_proj even when attention_k_eq_v is true

@@ -48,6 +48,8 @@ def load_model(model_path, max_memory_gb=None):
         tie_word_embeddings=config.get("tie_word_embeddings", True),
         max_position_embeddings=tc.get("max_position_embeddings", 262144),
         layer_types=tc.get("layer_types", []),
+        num_kv_shared_layers=tc.get("num_kv_shared_layers", 0) or 0,
+        hidden_size_per_layer_input=tc.get("hidden_size_per_layer_input", 0) or 0,
     )
 
     # Create model
