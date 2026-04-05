@@ -30,11 +30,14 @@ RUN chmod +x /build/apply.sh
 RUN cd /build/llama.cpp && /build/apply.sh
 
 # Build with CUDA (A100=80, RTX 3090=86, RTX 4090=89, H100=90)
+# Link against CUDA driver stub for cuGetErrorString etc.
 RUN cd /build/llama.cpp && \
     cmake -B build \
       -DGGML_CUDA=ON \
       -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90" \
-      -DCMAKE_BUILD_TYPE=Release && \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_EXE_LINKER_FLAGS="-L/usr/local/cuda/lib64/stubs -lcuda" \
+      -DCMAKE_SHARED_LINKER_FLAGS="-L/usr/local/cuda/lib64/stubs -lcuda" && \
     cmake --build build -j$(nproc) --target llama-server
 
 # ── Stage 2: Runtime ────────────────────────────────────────
