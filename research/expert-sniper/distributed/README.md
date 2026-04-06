@@ -33,9 +33,36 @@ MoE (Mixture-of-Experts) models only activate ~3% of parameters per token. The o
 | Qwen 3.5-35B-A3B | 35B | 3.5B | 3 Mac Minis | **1.30 tok/s** |
 | Gemma 4-26B-A4B | 26B | 3.8B | 3 Mac Minis | **1.23 tok/s** |
 
-Tested on Scaleway Mac Mini M2 (16 GB, ~$0.13/hr each).
+### Test Hardware
 
-> **These speeds are not fast.** We know. The bottleneck is 30-40 sequential HTTP round trips per token over the network. We're actively optimizing (raw TCP, pipelining, better batching) and **open-sourcing so the community can help push this further.** If you have ideas — open an issue or PR.
+All results measured on 3 identical Scaleway Mac Minis in the `fr-par-1` datacenter:
+
+| Spec | Value |
+|------|-------|
+| Machine | Mac Mini (Mac14,3) |
+| Chip | Apple M2 |
+| CPU | 8 cores (4 performance + 4 efficiency) |
+| Memory | 16 GB unified (100 GB/s bandwidth) |
+| Storage | 256 GB SSD |
+| Network | Scaleway internal — same datacenter, ~6ms RTT between nodes |
+| OS | macOS (Darwin) |
+| Cost | ~$0.13/hr per node ($0.40/hr total for 3) |
+
+These are the **cheapest Apple Silicon machines you can rent**. The M2 has 100 GB/s memory bandwidth — much lower than M2 Pro (200 GB/s), M2 Max (400 GB/s), or M4 (120 GB/s). On faster hardware or a LAN/Thunderbolt connection, expect significantly better results.
+
+### Expected Scaling
+
+| Setup | Est. Speed | Why |
+|-------|-----------|-----|
+| 3x Scaleway M2 (cloud, ~6ms RTT) | 1.30 tok/s | Current baseline |
+| 3x Mac Mini on home LAN (~0.3ms RTT) | ~3-5 tok/s | 20x lower network latency |
+| 2x Mac via Thunderbolt (~0.05ms RTT) | ~5-8 tok/s | Near-zero latency |
+| 3x M4 Mac Mini on LAN | ~4-7 tok/s | Faster compute + lower latency |
+| 4+ nodes | Higher | More parallelism, less work per node |
+
+These are estimates based on our profiling (62% of time is network, 38% is local compute). We haven't tested LAN/Thunderbolt yet — **if you do, please share your results!**
+
+> **These speeds are not fast yet.** We know. The bottleneck is 30-40 sequential HTTP round trips per token over the network. We're actively optimizing (raw TCP, pipelining, better batching) and **open-sourcing so the community can help push this further.** If you have ideas — open an issue or PR.
 
 ## Single Mac? Use mlx-sniper Instead
 
