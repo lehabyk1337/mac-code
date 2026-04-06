@@ -177,6 +177,41 @@ distributed/
 └── README.md                    # This file
 ```
 
+## Network Setup — LAN, Thunderbolt, and Cloud
+
+mac-tensor works over any TCP network. The faster your connection, the faster inference runs. Here's how different setups compare:
+
+| Connection | Latency | Expected Boost | Setup |
+|-----------|---------|----------------|-------|
+| Cloud (Scaleway) | ~6ms RTT | Baseline (1.3 tok/s) | Default — just use public IPs |
+| Home LAN (Ethernet) | ~0.3ms RTT | **~3-4x faster** | Connect Macs to same switch/router |
+| Thunderbolt Bridge | ~0.05ms RTT | **~5-8x faster** | Direct Thunderbolt cable between Macs |
+
+### Home LAN Setup
+Just plug your Macs into the same router/switch via Ethernet. Find each Mac's IP:
+```bash
+# On each Mac:
+ipconfig getifaddr en0    # Ethernet
+ipconfig getifaddr en1    # Wi-Fi (slower, not recommended)
+```
+Then use those IPs in the `--nodes` argument. Gigabit Ethernet is fine — each layer only transfers ~5 KB.
+
+### Thunderbolt Bridge (Fastest)
+Connect two Macs directly via a Thunderbolt cable for near-zero latency:
+
+1. Connect Thunderbolt cable between Macs
+2. On both Macs: **System Settings → Network → Thunderbolt Bridge**
+3. Set manual IPs (e.g., Mac A: `169.254.1.1`, Mac B: `169.254.1.2`)
+4. Use those IPs in `--nodes`:
+```bash
+python3 distributed_interactive.py --nodes http://169.254.1.1:8301,http://169.254.1.2:8301
+```
+
+Thunderbolt 3/4 gives 40 Gbps with sub-millisecond latency. Since our bottleneck is round-trip latency (not bandwidth), this is the single biggest speed improvement you can make.
+
+### Wi-Fi
+It works, but Wi-Fi adds jitter and latency spikes. Expect ~50-70% of Ethernet speed. Use Ethernet if possible.
+
 ## Known Limitations & Optimization Ideas
 
 **Current bottleneck:** 30-40 sequential HTTP round trips per token (~12ms each on typical network = 360-480ms of network time per token).
