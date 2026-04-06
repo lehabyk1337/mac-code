@@ -694,11 +694,26 @@ Local commands (run on the Mac itself):
     p_hl = sub.add_parser("health", help="Check node health (standalone)")
     p_hl.add_argument("--nodes", required=True, help="Comma-separated URLs")
 
+    # Agent (interactive agentic REPL with tool use)
+    p_ag = sub.add_parser("agent", help="Interactive agentic REPL with tools")
+    p_ag.add_argument("--model", choices=SUPPORTED_MODELS.keys(), default="gemma4")
+    p_ag.add_argument("--nodes", required=True, help="Comma-separated expert node URLs")
+    p_ag.add_argument("--max-iterations", type=int, default=8,
+                      help="Max tool-call iterations per question (default 8)")
+    p_ag.add_argument("--max-tokens", type=int, default=400,
+                      help="Max tokens per model response (default 400)")
+    p_ag.add_argument("--write", action="store_true",
+                      help="Allow file writes and destructive shell commands")
+
     args = parser.parse_args()
 
     if args.command is None:
         parser.print_help()
         sys.exit(0)
+
+    def cmd_agent(args):
+        from .agent import main as agent_main
+        agent_main(args)
 
     commands = {
         "init": cmd_init,
@@ -712,6 +727,7 @@ Local commands (run on the Mac itself):
         "node": cmd_node_local,
         "download": cmd_download_local,
         "health": lambda a: cmd_health_standalone(a),
+        "agent": cmd_agent,
     }
 
     commands[args.command](args)
