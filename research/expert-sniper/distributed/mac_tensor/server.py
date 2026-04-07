@@ -44,7 +44,12 @@ def run_server(model_key, node_urls=None, host="0.0.0.0", port=8500, allow_write
         threading.Thread(target=reaper_loop, args=(swarm_registry,), daemon=True).start()
         print(f"Swarm registry started (model={model_key})")
 
-    if vision:
+    if swarm_leader:
+        # Leader mode: no LLM backend loaded yet — peers register dynamically.
+        # The leader can ALSO load a backend on demand (later) when peers exist.
+        backend = None
+        print("Running as swarm leader. Workers join via mac-tensor join.")
+    elif vision:
         print(f"Loading vision Gemma 4 sniper (single-machine)...")
         from .vision_engine import VisionGemma4Sniper
         vision_engine = VisionGemma4Sniper(
@@ -179,6 +184,12 @@ def run_server(model_key, node_urls=None, host="0.0.0.0", port=8500, allow_write
 
     @app.post("/api/chat")
     async def chat(request: Request):
+        if backend is None:
+            return JSONResponse({
+                "error": "no LLM backend loaded — this server is a swarm leader without "
+                         "a coordinator. Phase 2 will add on-demand backend loading."
+            }, status_code=503)
+
         body = await request.json()
         message = body.get("message", "").strip()
         if not message:
