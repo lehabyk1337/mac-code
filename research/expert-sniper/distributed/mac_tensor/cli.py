@@ -708,11 +708,15 @@ Local commands (run on the Mac itself):
     # UI (web chat interface)
     p_ui = sub.add_parser("ui", help="Web chat UI for the distributed agent")
     p_ui.add_argument("--model", choices=SUPPORTED_MODELS.keys(), default="gemma4")
-    p_ui.add_argument("--nodes", required=True, help="Comma-separated expert node URLs")
+    p_ui.add_argument("--nodes", help="Comma-separated expert node URLs (omit if --vision)")
     p_ui.add_argument("--host", default="0.0.0.0", help="Bind host (default 0.0.0.0)")
     p_ui.add_argument("--port", type=int, default=8500, help="Port (default 8500)")
     p_ui.add_argument("--write", action="store_true",
                       help="Allow file writes and destructive shell commands")
+    p_ui.add_argument("--vision", action="store_true",
+                      help="Single-machine vision mode (Gemma 4 + image upload)")
+    p_ui.add_argument("--stream-dir", help="Vision: path to gemma4-stream split dir")
+    p_ui.add_argument("--source-dir", help="Vision: path to gemma4-26b-4bit source dir")
 
     args = parser.parse_args()
 

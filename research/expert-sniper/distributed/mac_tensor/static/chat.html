@@ -450,8 +450,16 @@
 <footer>
   <div class="input-row">
     <div class="input-wrap">
+      <div id="image-preview" style="display:none; margin-bottom:8px;">
+        <div style="position:relative; display:inline-block;">
+          <img id="preview-img" style="max-height:80px; max-width:120px; border-radius:8px; border:1px solid var(--border);">
+          <button id="remove-image" style="position:absolute; top:-6px; right:-6px; width:22px; height:22px; border-radius:50%; background:var(--red); color:white; border:none; cursor:pointer; font-size:14px; line-height:1;">×</button>
+        </div>
+      </div>
       <textarea id="input" placeholder="Ask the agent anything..." rows="1"></textarea>
     </div>
+    <input type="file" id="file-input" accept="image/*" style="display:none;">
+    <button class="btn" id="upload-btn" title="Upload image" style="height:50px; width:50px; padding:0; font-size:20px;" data-vision="{{VISION_ENABLED}}">📷</button>
     <button class="btn primary send-btn" id="send-btn">Send</button>
   </div>
 </footer>
@@ -461,8 +469,62 @@ const messagesEl = document.getElementById('messages');
 const inputEl = document.getElementById('input');
 const sendBtn = document.getElementById('send-btn');
 const resetBtn = document.getElementById('reset-btn');
+const uploadBtn = document.getElementById('upload-btn');
+const fileInput = document.getElementById('file-input');
+const imagePreview = document.getElementById('image-preview');
+const previewImg = document.getElementById('preview-img');
+const removeImageBtn = document.getElementById('remove-image');
+
+const VISION_ENABLED = uploadBtn.dataset.vision === 'true';
+if (!VISION_ENABLED) {
+  uploadBtn.style.display = 'none';
+}
 
 let isGenerating = false;
+let attachedImage = null;
+
+uploadBtn.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  attachedImage = file;
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    previewImg.src = ev.target.result;
+    imagePreview.style.display = 'block';
+  };
+  reader.readAsDataURL(file);
+});
+removeImageBtn.addEventListener('click', () => {
+  attachedImage = null;
+  fileInput.value = '';
+  imagePreview.style.display = 'none';
+});
+
+// Drag-and-drop
+document.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  if (!VISION_ENABLED) return;
+  document.body.style.background = 'rgba(99, 102, 241, 0.05)';
+});
+document.addEventListener('dragleave', () => {
+  document.body.style.background = '';
+});
+document.addEventListener('drop', (e) => {
+  e.preventDefault();
+  document.body.style.background = '';
+  if (!VISION_ENABLED) return;
+  const file = e.dataTransfer.files[0];
+  if (file && file.type.startsWith('image/')) {
+    attachedImage = file;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      previewImg.src = ev.target.result;
+      imagePreview.style.display = 'block';
+    };
+    reader.readAsDataURL(file);
+  }
+});
 
 function setInput(text) {
   inputEl.value = text;
@@ -502,13 +564,17 @@ function clearEmpty() {
   if (examples) examples.remove();
 }
 
-function appendMessage(role, content) {
+function appendMessage(role, content, imageDataUrl) {
   clearEmpty();
   const wrap = document.createElement('div');
   wrap.className = 'message';
+  let imageHtml = '';
+  if (imageDataUrl) {
+    imageHtml = `<img src="${imageDataUrl}" style="max-width:300px; max-height:200px; border-radius:10px; border:1px solid var(--border); margin-bottom:8px;">`;
+  }
   wrap.innerHTML = `
     <div class="message-role ${role}">${role === 'user' ? 'You' : 'Agent'}</div>
-    <div class="bubble ${role}">${escapeHtml(content)}</div>
+    <div class="bubble ${role}">${imageHtml}${escapeHtml(content)}</div>
   `;
   messagesEl.appendChild(wrap);
   scrollToBottom();
@@ -553,7 +619,15 @@ async function sendMessage() {
   inputEl.value = '';
   autoResize();
 
-  appendMessage('user', message);
+  // Capture the image data URL to show it in the message bubble
+  const imageDataUrl = attachedImage ? previewImg.src : null;
+  const imageToSend = attachedImage;
+  // Clear the preview now (so it doesn't stick around for the next message)
+  attachedImage = null;
+  fileInput.value = '';
+  imagePreview.style.display = 'none';
+
+  appendMessage('user', message, imageDataUrl);
   const progressWrap = appendThinking();
   const stepsContainer = progressWrap.querySelector('.steps');
   const thinkingEl = progressWrap.querySelector('.thinking');
@@ -562,15 +636,25 @@ async function sendMessage() {
   let finalText = '';
 
   try {
-    const response = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        message,
-        max_iterations: 5,
-        max_tokens: 250,
-      }),
-    });
+    let response;
+    if (imageToSend) {
+      // Vision mode — multipart/form-data
+      const fd = new FormData();
+      fd.append('message', message);
+      fd.append('max_tokens', '200');
+      fd.append('image', imageToSend);
+      response = await fetch('/api/chat_vision', { method: 'POST', body: fd });
+    } else {
+      response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message,
+          max_iterations: 5,
+          max_tokens: 250,
+        }),
+      });
+    }
 
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
@@ -622,6 +706,10 @@ async function sendMessage() {
         if (currentStep) {
           currentStep.querySelector('.tool-result').textContent = event.result;
         }
+      } else if (event.type === 'token') {
+        // Vision mode streams tokens directly (no tool calls)
+        finalText += event.text;
+        thinkingEl.innerHTML = `<div style="font-size:15px; line-height:1.55; white-space:pre-wrap;">${escapeHtml(finalText)}</div>`;
       } else if (event.type === 'final') {
         finalText = event.text;
       } else if (event.type === 'error') {
