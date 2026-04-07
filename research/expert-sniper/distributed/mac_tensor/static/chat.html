@@ -413,6 +413,7 @@
   </div>
   <div class="actions">
     <div class="status"><span class="dot"></span> Connected</div>
+    <button class="btn" id="save-btn" title="Download conversation as JSON">💾 Save</button>
     <button class="btn" id="reset-btn">Reset</button>
   </div>
 </header>
@@ -490,6 +491,7 @@ if (FALCON_ENABLED) {
 
 let isGenerating = false;
 let attachedImage = null;
+const conversation = [];  // [{role, text, image?, tools?}]
 
 uploadBtn.addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', (e) => {
@@ -630,9 +632,27 @@ groundBtn.addEventListener('click', async () => {
         <i>"${escapeHtml(query)}"</i>
         in ${data.elapsed_seconds}s
       </div>
-      <img src="${data.annotated_image}" style="max-width:100%; border-radius:10px; border:1px solid var(--border);">
+      <div style="position:relative; display:inline-block;">
+        <img src="${data.annotated_image}" style="max-width:100%; border-radius:10px; border:1px solid var(--border); display:block;">
+        <button class="download-btn" style="position:absolute; top:8px; right:8px; padding:6px 12px; border-radius:6px; background:rgba(0,0,0,0.7); color:white; border:1px solid rgba(255,255,255,0.3); cursor:pointer; font-size:12px;">⬇ Download</button>
+      </div>
       ${metaHtml}
     `;
+    // Wire up the download button
+    const dlBtn = bubble.querySelector('.download-btn');
+    dlBtn.addEventListener('click', () => {
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      downloadDataUrl(data.annotated_image, `falcon-${query.replace(/\s+/g,'_')}-${ts}.png`);
+    });
+    // Save to conversation log
+    conversation.push({
+      role: 'falcon',
+      query,
+      count: data.count,
+      masks: data.masks,
+      annotated_image: data.annotated_image,
+      timestamp: new Date().toISOString(),
+    });
   } catch (e) {
     bubble.innerHTML = `<span style="color: var(--red);">Error: ${escapeHtml(e.message)}</span>`;
   } finally {
@@ -645,6 +665,7 @@ groundBtn.addEventListener('click', async () => {
 
 resetBtn.addEventListener('click', async () => {
   await fetch('/api/reset', { method: 'POST' });
+  conversation.length = 0;
   // Clear UI
   messagesEl.innerHTML = `
     <div class="empty">
@@ -653,6 +674,39 @@ resetBtn.addEventListener('click', async () => {
     </div>
   `;
 });
+
+// Save conversation as JSON
+const saveBtn = document.getElementById('save-btn');
+saveBtn.addEventListener('click', () => {
+  if (conversation.length === 0) {
+    alert('No conversation to save yet — chat with the agent first!');
+    return;
+  }
+  const exportData = {
+    timestamp: new Date().toISOString(),
+    model: document.querySelector('.brand-info b')?.textContent || 'mac-tensor',
+    messages: conversation,
+  };
+  const blob = new Blob([JSON.stringify(exportData, null, 2)], {type: 'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `mac-tensor-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+});
+
+// Helper: download an image from a data URL
+function downloadDataUrl(dataUrl, filename) {
+  const a = document.createElement('a');
+  a.href = dataUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
 
 function clearEmpty() {
   const empty = messagesEl.querySelector('.empty');
@@ -667,7 +721,7 @@ function appendMessage(role, content, imageDataUrl) {
   wrap.className = 'message';
   let imageHtml = '';
   if (imageDataUrl) {
-    imageHtml = `<img src="${imageDataUrl}" style="max-width:300px; max-height:200px; border-radius:10px; border:1px solid var(--border); margin-bottom:8px;">`;
+    imageHtml = `<img src="${imageDataUrl}" style="max-width:300px; max-height:200px; border-radius:10px; border:1px solid var(--border); margin-bottom:8px; display:block;">`;
   }
   wrap.innerHTML = `
     <div class="message-role ${role}">${role === 'user' ? 'You' : 'Agent'}</div>
@@ -675,6 +729,13 @@ function appendMessage(role, content, imageDataUrl) {
   `;
   messagesEl.appendChild(wrap);
   scrollToBottom();
+  // Track in conversation log
+  conversation.push({
+    role,
+    text: content,
+    image: imageDataUrl || null,
+    timestamp: new Date().toISOString(),
+  });
   return wrap;
 }
 
@@ -820,6 +881,12 @@ async function sendMessage() {
         finalDiv.style.whiteSpace = 'pre-wrap';
         finalDiv.textContent = finalText || '(no answer)';
         thinkingEl.appendChild(finalDiv);
+        // Save to conversation log
+        conversation.push({
+          role: 'agent',
+          text: finalText || '(no answer)',
+          timestamp: new Date().toISOString(),
+        });
       }
     }
   } catch (e) {

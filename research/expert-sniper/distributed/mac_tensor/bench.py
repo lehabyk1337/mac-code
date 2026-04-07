@@ -48,18 +48,44 @@ PROMPTS = [
 ]
 
 
-def send_request(server_url, client_id, request_id, prompt, max_tokens):
+def detect_endpoint(server_url):
+    """Probe /api/info to figure out which endpoint to use."""
+    try:
+        with urllib.request.urlopen(f"{server_url}/api/info", timeout=5) as r:
+            info = json.loads(r.read())
+            if info.get("vision"):
+                return "/api/chat_vision", "vision"
+            else:
+                return "/api/chat", "text"
+    except Exception:
+        return "/api/chat", "text"
+
+
+def send_request(server_url, endpoint, mode, client_id, request_id, prompt, max_tokens):
     """Send one chat request and return (tokens_generated, elapsed_seconds)."""
-    body = json.dumps({
-        "message": prompt,
-        "max_iterations": 1,
-        "max_tokens": max_tokens,
-    }).encode()
+    if mode == "vision":
+        # Vision endpoint uses multipart/form-data; we send no image
+        boundary = f"----maccastpacker{client_id}{request_id}{int(time.time()*1000)}"
+        body_parts = []
+        body_parts.append(f"--{boundary}\r\n")
+        body_parts.append('Content-Disposition: form-data; name="message"\r\n\r\n')
+        body_parts.append(prompt)
+        body_parts.append(f"\r\n--{boundary}\r\n")
+        body_parts.append('Content-Disposition: form-data; name="max_tokens"\r\n\r\n')
+        body_parts.append(str(max_tokens))
+        body_parts.append(f"\r\n--{boundary}--\r\n")
+        body = "".join(body_parts).encode()
+        headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+    else:
+        body = json.dumps({
+            "message": prompt,
+            "max_iterations": 1,
+            "max_tokens": max_tokens,
+        }).encode()
+        headers = {"Content-Type": "application/json"}
 
     req = urllib.request.Request(
-        f"{server_url}/api/chat",
-        data=body,
-        headers={"Content-Type": "application/json"},
+        f"{server_url}{endpoint}", data=body, headers=headers,
     )
 
     t_start = time.time()
@@ -90,12 +116,12 @@ def send_request(server_url, client_id, request_id, prompt, max_tokens):
     return tokens_generated, elapsed
 
 
-def run_client(server_url, client_id, num_requests, max_tokens):
+def run_client(server_url, endpoint, mode, client_id, num_requests, max_tokens):
     """Single client running num_requests sequentially."""
     results = []
     for r in range(num_requests):
         prompt = PROMPTS[(client_id * 7 + r) % len(PROMPTS)]
-        tokens, elapsed = send_request(server_url, client_id, r, prompt, max_tokens)
+        tokens, elapsed = send_request(server_url, endpoint, mode, client_id, r, prompt, max_tokens)
         rate = tokens / elapsed if elapsed > 0 else 0
         print(f"  [c{client_id} r{r}] {tokens} tokens in {elapsed:.1f}s = {rate:.2f} tok/s",
               flush=True)
@@ -118,11 +144,21 @@ def main(args):
     print(f"  Max tokens: {max_tokens}")
     print("=" * 60)
 
-    # Verify server is reachable
+    # Verify server is reachable + auto-detect endpoint
+    endpoint, mode = detect_endpoint(server)
     try:
         with urllib.request.urlopen(f"{server}/api/info", timeout=5) as r:
             info = json.loads(r.read())
-            print(f"  Backend:    {info.get('model')} ({len(info.get('nodes') or [])} nodes)")
+            nodes = info.get('nodes')
+            n_nodes = len(nodes) if nodes else 0
+            backend_label = f"{info.get('model')} ({mode}"
+            if mode == "vision":
+                backend_label += ", single Mac"
+            else:
+                backend_label += f", {n_nodes} nodes"
+            backend_label += ")"
+            print(f"  Backend:    {backend_label}")
+            print(f"  Endpoint:   {endpoint}")
     except Exception as e:
         print(f"Cannot reach server at {server}: {e}")
         sys.exit(1)
@@ -134,7 +170,7 @@ def main(args):
 
     with ThreadPoolExecutor(max_workers=n_clients) as pool:
         futures = [
-            pool.submit(run_client, server, i, n_requests, max_tokens)
+            pool.submit(run_client, server, endpoint, mode, i, n_requests, max_tokens)
             for i in range(n_clients)
         ]
         for f in as_completed(futures):
